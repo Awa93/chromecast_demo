@@ -1,1 +1,540 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 
+// Constants
+const NAMESPACE = 'urn:x-cast:custom-receiver'; // Use a unique namespace
+const DEFAULT_MEDIA_RECEIVER_APP_ID = 'CC1AD50A'; // Default Media Receiver
+
+interface CastSession {
+    sendMessage: (namespace: string, message: any) => void;
+    getMediaStatus: () => Promise<any>;
+    loadMedia: (request: any) => Promise<any>;
+    getSessionState: () => string;
+    addMessageListener: (namespace: string, callback: (namespace: string, message: string) => void) => void;
+    removeMessageListener: (namespace: string, callback: (namespace: string, message: string) => void) => void;
+    removeEventListener: (eventType: string, callback: (event: any) => void) => void;
+    on: (eventType: string, callback: (event: any) => void) => void;
+    close: () => void;
+}
+
+const useCastSession = () => {
+    const [session, setSession] = useState<CastSession | null>(null);
+    const [sessionState, setSessionState] = useState<string>('NO_SESSION'); // Add session state
+    const [error, setError] = useState<Error | null>(null);
+    const castContextRef = useRef<any>(null);
+    const sessionRef = useRef<CastSession | null>(null);
+
+    const getCastContext = useCallback(() => {
+        if (!castContextRef.current) {
+            castContextRef.current = (window as any).cast?.framework?.CastContext?.getInstance();
+        }
+        return castContextRef.current;
+    }, []);
+
+    const createMockSession = useCallback((): CastSession => {
+        const listeners: { [key: string]: ((...args: any[]) => void)[] } = {};
+        const messageListeners: { [namespace: string]: ((namespace: string, message: string) => void)[] } = {};
+        let mockMediaStatus = {};
+
+        const mockSession: CastSession = {
+            sendMessage: (namespace: string, message: any) => {
+                console.log(`[Mock Session] Sending message to ${namespace}:`, message);
+                if (messageListeners[namespace]) {
+                    messageListeners[namespace].forEach(callback => callback(namespace, JSON.stringify(message)));
+                }
+            },
+            getMediaStatus: () => {
+                console.log('[Mock Session] getMediaStatus:', mockMediaStatus);
+                return Promise.resolve(mockMediaStatus);
+            },
+            loadMedia: (request: any) => {
+                console.log('[Mock Session] Loading media:', request);
+                // Simulate a successful load
+                mockMediaStatus = {
+                    media: request.media,
+                    playbackRate: 1,
+                    playerState: 'PLAYING', // Or BUFFERING, IDLE, etc.
+                    currentTime: 0,
+                    duration: request.media?.duration || 100, //mock
+                    volume: { level: 1, muted: false },
+                    isMuted: false,
+                    customData: request.customData,
+                };
+
+                // Simulate media status changes
+                setTimeout(() => {
+                    if (listeners['MEDIA_STATUS_CHANGED']) {
+                        listeners['MEDIA_STATUS_CHANGED'].forEach(callback => callback({ status: mockMediaStatus }));
+                    }
+                }, 500); // Simulate a short delay
+
+                return Promise.resolve({/* Mock media info */});
+            },
+            getSessionState: () => {
+                console.log('[Mock Session] getSessionState:', sessionState);
+                return sessionState;
+            },
+            addMessageListener: (namespace: string, callback: (namespace: string, message: string) => void) => {
+                console.log(`[Mock Session] Adding message listener for ${namespace}`);
+                if (!messageListeners[namespace]) {
+                    messageListeners[namespace] = [];
+                }
+                messageListeners[namespace].push(callback);
+            },
+            removeMessageListener: (namespace: string, callback: (namespace: string, message: string) => void) => {
+                console.log(`[Mock Session] Removing message listener for ${namespace}`);
+                if (messageListeners[namespace]) {
+                    messageListeners[namespace] = messageListeners[namespace].filter(cb => cb !== callback);
+                }
+            },
+            removeEventListener: (eventType: string, callback: (event: any) => void) => {
+                console.log(`[Mock Session] Removing event listener for ${eventType}`);
+                if (listeners[eventType]) {
+                    listeners[eventType] = listeners[eventType].filter(cb => cb !== callback);
+                }
+            },
+            on: (eventType: string, callback: (event: any) => void) => {
+                console.log(`[Mock Session] Adding event listener for ${eventType}`);
+                if (!listeners[eventType]) {
+                    listeners[eventType] = [];
+                }
+                listeners[eventType].push(callback);
+            },
+            close: () => {
+                console.log('[Mock Session] Closing session');
+                setSession(null);
+                setSessionState('SESSION_ENDED');
+                sessionRef.current = null;
+            },
+        };
+        return mockSession;
+    }, [sessionState]);
+
+    const getSession = useCallback(async () => {
+        const context = getCastContext();
+        if (!context) {
+            // Return mock session if CastContext is not available
+            const mockSessionInstance = createMockSession();
+            setSession(mockSessionInstance);
+            sessionRef.current = mockSessionInstance; // Keep mock session in ref
+            return mockSessionInstance;
+        }
+
+        try {
+            const currentSession = context.getCurrentSession();
+            if (currentSession) {
+                setSession(currentSession);
+                sessionRef.current = currentSession;
+                setSessionState(currentSession.getSessionState()); //set session state
+                return currentSession;
+            } else {
+                return null;
+            }
+
+        } catch (e: any) {
+            setError(e);
+            console.error("Error getting session:", e);
+            return null;
+        }
+    }, [getCastContext, createMockSession]);
+
+    const startSession = useCallback(async () => {
+        const context = getCastContext();
+        if (!context) {
+            // Start mock session if CastContext is not available
+            const mockSessionInstance = createMockSession();
+            setSession(mockSessionInstance);
+            sessionRef.current = mockSessionInstance; // Keep mock session in ref
+            setSessionState('SESSION_STARTED');
+            return;
+        }
+
+        try {
+            const newSession = await context.requestSession();
+            setSession(newSession);
+            sessionRef.current = newSession;
+            setSessionState(newSession.getSessionState()); //set session state
+        } catch (e: any) {
+            setError(e);
+            console.error("Error starting session:", e);
+            setSession(null);
+            setSessionState('SESSION_START_FAILED');
+        }
+    }, [getCastContext, createMockSession]);
+
+    const endSession = useCallback(async () => {
+        const currentSession = sessionRef.current; // Use the ref
+        if (currentSession) {
+            try {
+                await currentSession.close();
+                setSession(null);
+                setSessionState('SESSION_ENDED');
+                sessionRef.current = null;
+            } catch (e: any) {
+                setError(e);
+                console.error("Error ending session:", e);
+            }
+        } else {
+            setSession(null);
+            setSessionState('SESSION_ENDED');
+            sessionRef.current = null;
+        }
+    }, []);
+
+    useEffect(() => {
+        const context = getCastContext();
+        if (!context) {
+            // Mock initialization
+            const mockSessionInstance = createMockSession();
+            setSession(mockSessionInstance);
+            sessionRef.current = mockSessionInstance; // Keep mock session in ref
+            setSessionState('SESSION_STARTED');
+
+            const mockOnCastStateChanged = (callback: (state: any) => void) => {
+                // Simulate initial state
+                callback({
+                    castState: 'NO_DEVICES_AVAILABLE', // Or NO_DEVICES_AVAILABLE, NOT_CONNECTED, CONNECTED
+                });
+
+                // Simulate a connection after a delay
+                setTimeout(() => {
+                    callback({
+                        castState: 'CONNECTED',
+                    });
+                }, 2000);
+            };
+
+            const mockOnSessionStateChanged = (callback: (state: string) => void) => {
+                // Simulate initial state
+                callback('NO_SESSION');
+
+                // Simulate session start
+                setTimeout(() => {
+                    setSessionState('SESSION_STARTED');
+                    callback('SESSION_STARTED');
+                }, 3000);
+
+                // Simulate session end after a delay
+                setTimeout(() => {
+                    setSessionState('SESSION_ENDED');
+                    callback('SESSION_ENDED');
+                }, 10000);
+            };
+
+            // Simulate CastContext
+            (window as any).cast = {
+                framework: {
+                    CastContext: {
+                        getInstance: () => ({
+                            addEventListener: (eventType: string, callback: (event: any) => void) => {
+                                if (eventType === 'CAST_STATE_CHANGED') {
+                                    mockOnCastStateChanged(callback);
+                                }
+                                if (eventType === 'SESSION_STATE_CHANGED') {
+                                    mockOnSessionStateChanged(callback);
+                                }
+                            },
+                            removeEventListener: () => { },
+                            setOptions: () => { },
+                            requestSession: async () => {
+                                // Simulate a successful session start
+                                setSessionState('SESSION_STARTED');
+                                return createMockSession();
+                            },
+                            getCurrentSession: () => {
+                                return sessionRef.current;
+                            },
+                            getSessionState: () => sessionState,
+                        }),
+                        addEventListener: () => { },
+                        removeEventListener: () => { },
+                        setOptions: () => { },
+                    },
+                    CastSession: {},
+                    SessionState: {
+                        NO_SESSION: 'NO_SESSION',
+                        SESSION_STARTING: 'SESSION_STARTING',
+                        SESSION_STARTED: 'SESSION_STARTED',
+                        SESSION_ENDING: 'SESSION_ENDING',
+                        SESSION_ENDED: 'SESSION_ENDED',
+                        SESSION_START_FAILED: 'SESSION_START_FAILED',
+                    },
+                    RemotePlayer: function () { },
+                    RemotePlayerController: function () { },
+                    ReconnectionPolicy: {
+                        DISABLED: 'DISABLED',
+                        RECONNECT_WITH_SESSION_ID: 'RECONNECT_WITH_SESSION_ID',
+                        RECONNECT_WITH_SESSION_ID_AND_REFRESH: 'RECONNECT_WITH_SESSION_ID_AND_REFRESH',
+                    },
+                    CastState: { // Mock CastState
+                        NO_DEVICES_AVAILABLE: 'NO_DEVICES_AVAILABLE',
+                        NOT_CONNECTED: 'NOT_CONNECTED',
+                        CONNECTING: 'CONNECTING',
+                        CONNECTED: 'CONNECTED',
+                    },
+                },
+                __platform__: {
+                    isIOS: false,
+                },
+            };
+
+            // Initialize mock CastContext
+            const mockCastContext = getCastContext();
+            mockCastContext.setOptions({
+                receiverApplicationId: DEFAULT_MEDIA_RECEIVER_APP_ID,
+                autoJoinPolicy: (window as any).cast.framework.AutoJoinPolicy.PAGE_SCAN,
+            });
+
+            // Simulate session start
+            startSession();
+
+        } else {
+            // Real initialization
+            context.addEventListener((window as any).cast.framework.CastContextEventType.SESSION_STATE_CHANGED, (event: any) => {
+                setSessionState(event.sessionState);
+                if (event.sessionState === (window as any).cast.framework.SessionState.SESSION_STARTED) {
+                    setSession(event.session);
+                    sessionRef.current = event.session;
+                } else if (event.sessionState === (window as any).cast.framework.SessionState.SESSION_ENDED ||
+                    event.sessionState === (window as any).cast.framework.SessionState.SESSION_START_FAILED) {
+                    setSession(null);
+                    sessionRef.current = null;
+                }
+            });
+
+            // Initialize CastContext
+            const castContext = getCastContext();
+            castContext.setOptions({
+                receiverApplicationId: DEFAULT_MEDIA_RECEIVER_APP_ID,
+                autoJoinPolicy: (window as any).cast.framework.AutoJoinPolicy.PAGE_SCAN,
+            });
+        }
+
+        return () => {
+            const context = getCastContext();
+            if (context) {
+                context.removeEventListener((window as any).cast.framework.CastContextEventType.SESSION_STATE_CHANGED, (event: any) => {
+                    setSessionState(event.sessionState);
+                    if (event.sessionState === (window as any).cast.framework.SessionState.SESSION_STARTED) {
+                        setSession(event.session);
+                        sessionRef.current = event.session;
+                    } else if (event.sessionState === (window as any).cast.framework.SessionState.SESSION_ENDED ||
+                        event.sessionState === (window as any).cast.framework.SessionState.SESSION_START_FAILED) {
+                        setSession(null);
+                        sessionRef.current = null;
+                    }
+                });
+            }
+        };
+    }, [getCastContext, createMockSession, startSession]);
+
+    return { session, error, getSession, startSession, endSession, sessionState };
+};
+
+const CustomReceiverApp = () => {
+    const { session, error, getSession, startSession, endSession, sessionState } = useCastSession();
+    const [message, setMessage] = useState<string>('Ready');
+    const [mediaInfo, setMediaInfo] = useState<any>(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [currentTime, setCurrentTime] = useState(0);
+    const [duration, setDuration] = useState(0);
+
+    const videoRef = useRef<HTMLVideoElement>(null);
+
+    // Utility function to simulate a delay
+    const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    // Handle custom messages
+    useEffect(() => {
+        if (session) {
+            const handleMessage = (_namespace: string, messageString: string) => {
+                const receivedMessage = JSON.parse(messageString);
+                console.log('Received message:', receivedMessage);
+                setMessage(`Received: ${receivedMessage.type}`);
+
+                switch (receivedMessage.type) {
+                    case 'LOAD':
+                        const loadRequest = receivedMessage.payload;
+                        setMediaInfo(loadRequest.media);
+                        if (videoRef.current) {
+                            videoRef.current.src = loadRequest.media.contentId;
+                            videoRef.current.load();
+                            videoRef.current.play().then(() => {
+                                setIsPlaying(true);
+                                setDuration(loadRequest.media.duration || 0); // Set duration
+                                sendPlaybackStatus(); //send status
+                            }).catch(e => {
+                                console.error("Playback failed:", e);
+                                setMessage(`Error: ${e.message}`);
+                            });
+                        }
+                        break;
+                    case 'PLAY':
+                        if (videoRef.current) {
+                            videoRef.current.play().then(() => {
+                                setIsPlaying(true);
+                                sendPlaybackStatus(); //send status
+                            }).catch(e => {
+                                console.error("Playback failed:", e);
+                                setMessage(`Error: ${e.message}`);
+                            });
+                        }
+                        break;
+                    case 'PAUSE':
+                        if (videoRef.current) {
+                            videoRef.current.pause();
+                            setIsPlaying(false);
+                            sendPlaybackStatus(); //send status
+                        }
+                        break;
+                    case 'STOP':
+                        if (videoRef.current) {
+                            videoRef.current.pause();
+                            videoRef.current.src = ''; // Clear source
+                            setIsPlaying(false);
+                            setMediaInfo(null);
+                            setCurrentTime(0);
+                            setDuration(0);
+                            sendPlaybackStatus(); //send status
+                        }
+                        break;
+                    case 'SEEK':
+                        if (videoRef.current) {
+                            videoRef.current.currentTime = receivedMessage.payload.currentTime;
+                            setCurrentTime(receivedMessage.payload.currentTime);
+                            sendPlaybackStatus(); //send status
+                        }
+                        break;
+                    case 'GET_STATUS':
+                        sendPlaybackStatus();
+                        break;
+                    default:
+                        setMessage(`Unknown message type: ${receivedMessage.type}`);
+                }
+            };
+
+            session.addMessageListener(NAMESPACE, handleMessage);
+
+            // Clean up listener on unmount
+            return () => {
+                session.removeMessageListener(NAMESPACE, handleMessage);
+            };
+        }
+    }, [session]);
+
+    // Send playback status
+    const sendPlaybackStatus = useCallback(() => {
+        if (session) {
+            const status = {
+                type: 'STATUS',
+                payload: {
+                    isPlaying: isPlaying,
+                    currentTime: videoRef.current ? videoRef.current.currentTime : currentTime,
+                    duration: videoRef.current ? videoRef.current.duration : duration,
+                    mediaInfo: mediaInfo,
+                },
+            };
+            session.sendMessage(NAMESPACE, status);
+        }
+    }, [session, isPlaying, currentTime, duration, mediaInfo]);
+
+    // Handle video time updates
+    useEffect(() => {
+        if (videoRef.current) {
+            const handleTimeUpdate = () => {
+                setCurrentTime(videoRef.current!.currentTime);
+            };
+            videoRef.current.addEventListener('timeupdate', handleTimeUpdate);
+            return () => {
+                videoRef.current?.removeEventListener('timeupdate', handleTimeUpdate);
+            };
+        }
+    }, []);
+
+    // Handle video end
+    useEffect(() => {
+        if (videoRef.current) {
+            const handleEnded = () => {
+                setIsPlaying(false);
+                setCurrentTime(0);
+                sendPlaybackStatus();
+            };
+            videoRef.current.addEventListener('ended', handleEnded);
+            return () => {
+                videoRef.current?.removeEventListener('ended', handleEnded);
+            };
+        }
+    }, [sendPlaybackStatus]);
+
+    useEffect(() => {
+        if (session) {
+            session.on('SESSION_STATE_CHANGED', (event: any) => {
+                setMessage(`Session State: ${event}`);
+            });
+        }
+    }, [session]);
+
+    return (
+        <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-4">
+            <h1 className="text-4xl font-bold mb-8 bg-gradient-to-r from-purple-500 to-blue-500 text-transparent bg-clip-text">
+                Custom Receiver
+            </h1>
+            <div className="mb-4">
+                <p className="text-lg">Status: {message}</p>
+                <p className="text-lg">Session State: {sessionState}</p>
+                {error && <p className="text-red-500">Error: {error.message}</p>}
+            </div>
+
+            <div className="mb-4">
+                <video
+                    ref={videoRef}
+                    className="w-full max-w-md h-auto rounded-lg border border-gray-700 bg-black"
+                    controls
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                />
+                {mediaInfo && (
+                    <div className='mt-2 text-center'>
+                        <p>Title: {mediaInfo.metadata?.title || 'N/A'}</p>
+                        <p>Current Time: {currentTime.toFixed(2)} / {duration.toFixed(2)}</p>
+                        <p>Playing: {isPlaying ? 'Yes' : 'No'}</p>
+                    </div>
+                )}
+            </div>
+
+            <div className="flex space-x-4 mb-4">
+                <Button
+                    onClick={() => getSession().then(s => s && setMessage('Session acquired'))}
+                    className="bg-blue-500 hover:bg-blue-600 text-white"
+                >
+                    Get Session
+                </Button>
+                <Button
+                    onClick={startSession}
+                    className="bg-green-500 hover:bg-green-600 text-white"
+                >
+                    Start Session
+                </Button>
+                <Button
+                    onClick={endSession}
+                    className="bg-red-500 hover:bg-red-600 text-white"
+                >
+                    End Session
+                </Button>
+            </div>
+
+            <div className="text-center">
+                <p className="text-gray-400 text-sm">
+                    This is a custom receiver application for Google Chromecast.  Send messages
+                    using a sender application with the namespace: <span className="font-mono text-yellow-400">{NAMESPACE}</span>
+                </p>
+                <p className="text-gray-400 text-sm">
+                    Ensure your sender app uses the same namespace and receiver ID.
+                </p>
+            </div>
+        </div>
+    );
+};
+
+export default CustomReceiverApp;
