@@ -1,15 +1,63 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>My Custom Receiver</title>
-    <link rel="stylesheet" href="receiver.css">
+  <meta charset="UTF-8">
+  <title>Custom Chromecast Receiver</title>
+  <style>
+    body {
+      background-color: black;
+      color: white;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    #videoElement {
+      max-width: 100%;
+      max-height: 100%;
+    }
+  </style>
 </head>
 <body>
-    <div id="video-container">
-        <video id="media-element" controls></video>
-        <div id="overlay"></div>
-    </div>
-    <script src="//www.gstatic.com/cast/sdk/libs/receiver/2.0.0/cast_receiver_framework.js"></script>
-    <script src="receiver.js"></script>
+  <video id="videoElement" controls></video>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script>
+    // Initialize the HLS.js player
+    var video = document.getElementById('videoElement');
+    if (Hls.isSupported()) {
+      var hls = new Hls();
+      hls.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
+        console.log('Manifest loaded, found ' + data.levels.length + ' quality level');
+      });
+
+      hls.on(Hls.Events.ERROR, function(event, data) {
+        if (data.fatal) {
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              console.error('Network error');
+              break;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              console.error('Media error');
+              break;
+            default:
+              console.error('Error:', data);
+          }
+        }
+      });
+
+      // Get the HLS URL passed from the sender app
+      var hlsUrl = window.castReceiverManager.getCastMessage();
+      if (hlsUrl) {
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+        video.play();
+      }
+    } else {
+      console.error('HLS is not supported on this device');
+    }
+  </script>
 </body>
 </html>
